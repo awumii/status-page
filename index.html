@@ -3,237 +3,68 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>awumii.pl — status infrastruktury</title>
-  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
-  <style>
-    :root {
-      --bg: #0d0f12;
-      --card: #161920;
-      --border: #252a34;
-      --text: #e2e8f0;
-      --muted: #8892a0;
-      --ok: #10b981;
-      --fail: #ef4444;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      padding: 2rem 1rem;
-      max-width: 820px;
-      margin: 0 auto;
-    }
-    header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 2rem;
-      padding-bottom: 1rem;
-      border-bottom: 1px solid var(--border);
-    }
-    h1 { font-size: 1.25rem; font-weight: 600; }
-    .live-badge {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.8rem;
-      color: var(--muted);
-    }
-    .dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 50%;
-      background: #f59e0b;
-      transition: background 0.3s;
-    }
-    .dot.connected { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-    .dot.error { background: var(--fail); }
-
-    .banner {
-      padding: 1rem 1.25rem;
-      border-radius: 8px;
-      margin-bottom: 2rem;
-      font-weight: 600;
-      border: 1px solid var(--border);
-      background: var(--card);
-    }
-    .banner.all-ok { border-color: rgba(16, 185, 129, 0.4); color: var(--ok); }
-    .banner.degraded { border-color: rgba(239, 68, 68, 0.5); color: var(--fail); }
-
-    .group-title {
-      font-size: 0.85rem;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: var(--muted);
-      margin: 1.5rem 0 0.75rem;
-    }
-    .card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1rem 1.25rem;
-      margin-bottom: 0.75rem;
-    }
-    .card-top {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 0.75rem;
-    }
-    .service-name { font-weight: 600; font-size: 1rem; }
-    .meta { font-size: 0.85rem; color: var(--muted); display: flex; gap: 1rem; }
-    .status-pill { font-weight: 700; }
-    .status-pill.up { color: var(--ok); }
-    .status-pill.down { color: var(--fail); }
-
-    .bars {
-      display: flex;
-      gap: 3px;
-      height: 24px;
-      align-items: flex-end;
-    }
-    .bar {
-      flex: 1;
-      height: 100%;
-      border-radius: 2px;
-      background: #252a34;
-      position: relative;
-      transition: transform 0.1s;
-    }
-    .bar:hover { transform: scaleY(1.15); }
-    .bar.up { background: var(--ok); }
-    .bar.down { background: var(--fail); }
-    footer {
-      margin-top: 2.5rem;
-      font-size: 0.75rem;
-      color: var(--muted);
-      text-align: center;
-    }
-  </style>
+  <title>awumii.pl // system telemetry</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js" defer></script>
+  <script src="app.js" defer></script>
 </head>
 <body>
-  <header>
-    <h1>awumii.pl // status</h1>
-    <div class="live-badge">
-      <span id="conn-dot" class="dot"></span>
-      <span id="conn-text">łączenie z brokerem...</span>
-    </div>
-  </header>
+  <div class="crt-overlay" aria-hidden="true"></div>
 
-  <div id="global-banner" class="banner">Oczekiwanie na telemetrię z VPS...</div>
-  <div id="app"></div>
-  <footer id="last-update">Brak danych</footer>
+  <main class="container">
+    <header class="top-bar">
+      <div class="brand">
+        <span class="prompt">root@awumii.pl:~#</span>
+        <h1>./status --live --telemetry</h1>
+      </div>
+      <div class="conn-status" id="conn-box">
+        <span class="led" id="conn-dot"></span>
+        <span id="conn-text">INIT_WSS...</span>
+      </div>
+    </header>
 
-  <script>
-    const MQTT_TOPIC = "awumii/status/1bec2409314ba39f47f4db73b81bdb3a0af2a9c3805d5e63";
-    const BROKER_URL = "wss://broker.emqx.io:8084/mqtt";
+    <section id="global-banner" class="banner pending">
+      <span class="banner-tag">[WAIT]</span>
+      <span id="banner-msg">Oczekiwanie na strumień telemetrii z węzła VPS...</span>
+    </section>
 
-    const dot = document.getElementById("conn-dot");
-    const connText = document.getElementById("conn-text");
-    const banner = document.getElementById("global-banner");
-    const app = document.getElementById("app");
-    const lastUpdateEl = document.getElementById("last-update");
+    <section class="summary-strip" id="summary-strip">
+      <div class="stat-box">
+        <span class="stat-label">ONLINE</span>
+        <span class="stat-val" id="stat-online">--/--</span>
+      </div>
+      <div class="stat-box">
+        <span class="stat-label">ŚR. UPTIME (OKNO)</span>
+        <span class="stat-val" id="stat-uptime">--%</span>
+      </div>
+      <div class="stat-box">
+        <span class="stat-label">ŚR. LATENCY</span>
+        <span class="stat-val" id="stat-latency">-- ms</span>
+      </div>
+      <div class="stat-box">
+        <span class="stat-label">INCYDENTY</span>
+        <span class="stat-val" id="stat-incidents">--</span>
+      </div>
+    </section>
 
-    const client = mqtt.connect(BROKER_URL, {
-      clientId: "awumii_web_" + Math.random().toString(16).slice(2, 10),
-      clean: true,
-      reconnectPeriod: 3000
-    });
+    <div id="app"></div>
 
-    client.on("connect", () => {
-      dot.className = "dot connected";
-      connText.textContent = "LIVE (WSS)";
-      client.subscribe(MQTT_TOPIC);
-    });
+    <section class="incidents-section">
+      <div class="section-header">
+        <h2>// DZIENNIK INCYDENTÓW (WYKRYTE ANOMALIE Z HISTORII GATUS)</h2>
+        <span class="hint" id="incident-window">okno: ostatnie 120 próbek / usługę</span>
+      </div>
+      <div id="incidents-list" class="incidents-list">
+        <div class="empty-log">Analiza logów pomiarowych...</div>
+      </div>
+    </section>
 
-    client.on("reconnect", () => {
-      dot.className = "dot";
-      connText.textContent = "wznawianie...";
-    });
+    <footer class="footer">
+      <span>SRC: GATUS_SQLITE -&gt; MQTT_WSS</span>
+      <span id="last-update">LAST_SYNC: NEVER</span>
+    </footer>
+  </main>
 
-    client.on("error", () => {
-      dot.className = "dot error";
-      connText.textContent = "błąd połączenia";
-    });
-
-    client.on("message", (_topic, payload) => {
-      try {
-        const endpoints = JSON.parse(payload.toString());
-        render(endpoints);
-      } catch (e) {
-        console.error("Błąd parsowania JSON:", e);
-      }
-    });
-
-    function render(endpoints) {
-      let allUp = true;
-      const groups = {};
-
-      endpoints.forEach(ep => {
-        const g = ep.group || "Inne";
-        if (!groups[g]) groups[g] = [];
-        groups[g].push(ep);
-
-        const last = ep.results[ep.results.length - 1];
-        if (!last || !last.success) allUp = false;
-      });
-
-      if (allUp) {
-        banner.className = "banner all-ok";
-        banner.textContent = "● Wszystkie systemy operacyjne";
-      } else {
-        banner.className = "banner degraded";
-        banner.textContent = "▲ Wykryto awarię jednego lub więcej komponentów";
-      }
-
-      app.innerHTML = "";
-      for (const [groupName, items] of Object.entries(groups)) {
-        const h2 = document.createElement("div");
-        h2.className = "group-title";
-        h2.textContent = groupName;
-        app.appendChild(h2);
-
-        items.forEach(ep => {
-          const results = ep.results || [];
-          const last = results[results.length - 1];
-          const isUp = last ? last.success : false;
-          const latency = last ? `${last.duration} ms` : "—";
-
-          const card = document.createElement("div");
-          card.className = "card";
-
-          const padded = Array(Math.max(0, 50 - results.length)).fill(null).concat(results);
-          const barsHtml = padded.map(r => {
-            if (!r) return `<div class="bar" title="Brak danych"></div>`;
-            const time = new Date(r.timestamp).toLocaleTimeString("pl-PL");
-            const cls = r.success ? "up" : "down";
-            const label = r.success ? `OK (${r.duration} ms) @ ${time}` : `FAIL @ ${time}`;
-            return `<div class="bar ${cls}" title="${label}"></div>`;
-          }).join("");
-
-          card.innerHTML = `
-            <div class="card-top">
-              <span class="service-name">${escapeHtml(ep.name)}</span>
-              <div class="meta">
-                <span>${latency}</span>
-                <span class="status-pill ${isUp ? "up" : "down"}">${isUp ? "ONLINE" : "OFFLINE"}</span>
-              </div>
-            </div>
-            <div class="bars">${barsHtml}</div>
-          `;
-          app.appendChild(card);
-        });
-      }
-
-      lastUpdateEl.textContent = "Ostatni pakiet: " + new Date().toLocaleTimeString("pl-PL");
-    }
-
-    function escapeHtml(str) {
-      return str.replace(/[&<>"']/g, m => ({
-        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-      }[m]));
-    }
-  </script>
+  <div id="tooltip" class="tooltip hidden"></div>
 </body>
 </html>
