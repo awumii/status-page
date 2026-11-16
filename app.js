@@ -3,9 +3,9 @@ const BROKER_URL = "wss://broker.emqx.io:8084/mqtt";
 const MAX_BARS = 60;
 const STALE_THRESHOLD_SEC = 45;
 
-// Progi czytelności pingu (ms) oraz wieku handshake WireGuard (s)
-const LATENCY_WARN_MS = 150;
-const LATENCY_CRIT_MS = 600;
+// Progi pingu (ms) oraz wieku handshake WireGuard (s)
+const LATENCY_WARN_MS = 250;
+const LATENCY_CRIT_MS = 650;
 const WG_HS_WARN_SEC = 135;
 
 const THEMES = [
@@ -25,6 +25,7 @@ const dom = {
   bannerMsg: document.getElementById("banner-msg"),
   app: document.getElementById("app"),
   incidentsList: document.getElementById("incidents-list"),
+  incidentWindow: document.getElementById("incident-window"),
   lastUpdate: document.getElementById("last-update"),
   statOnline: document.getElementById("stat-online"),
   statUptime: document.getElementById("stat-uptime"),
@@ -34,7 +35,6 @@ const dom = {
   themeBtn: document.getElementById("theme-toggle")
 };
 
-// Przełącznik luminoforu CRT
 (function initTheme() {
   const saved = localStorage.getItem("awumii_crt_theme") || "phosphor";
   applyTheme(saved);
@@ -78,13 +78,10 @@ client.on("error", () => {
 client.on("message", (_topic, payload) => {
   try {
     const parsed = JSON.parse(payload.toString());
-    if (Array.isArray(parsed)) {
-      lastEndpoints = parsed;
-      const latestSample = parsed[0]?.results?.at(-1)?.timestamp;
-      lastVpsTs = latestSample ? Math.floor(new Date(latestSample).getTime() / 1000) : null;
-    } else {
-      lastVpsTs = parsed.vps_ts;
-      lastEndpoints = parsed.endpoints || [];
+    lastVpsTs = parsed.vps_ts || Math.floor(Date.now() / 1000);
+    lastEndpoints = parsed.endpoints || [];
+    if (dom.incidentWindow) {
+      dom.incidentWindow.textContent = `OKNO: OSTATNIE ${parsed.window_hours || 24}H (60 × 24 MIN)`;
     }
     renderDashboard(lastEndpoints);
     checkHeartbeat();
@@ -111,8 +108,8 @@ function checkHeartbeat() {
 
 function renderDashboard(endpoints) {
   let onlineCount = 0;
-  let totalChecks = 0;
-  let totalSuccess = 0;
+  let uptimeSum = 0;
+  let uptimeCount = 0;
   const currentLatencies = [];
 
   const groups = {};
@@ -123,8 +120,7 @@ function renderDashboard(endpoints) {
     if (!groups[groupName]) groups[groupName] = [];
     groups[groupName].push(ep);
 
-    const results = ep.results || [];
-    const last = results[results.length - 1];
+    const last = ep.last;
     if (last && last.success) {
       onlineCount++;
       if (ep.key !== "wg-hs" && typeof last.duration === "number" && last.duration > 0) {
@@ -132,12 +128,20 @@ function renderDashboard(endpoints) {
       }
     }
 
-    results.forEach(r => {
-      totalChecks++;
-      if (r.success) totalSuccess++;
-    });
+    if (typeof ep.uptime24h === "number") {
+      uptimeSum += ep.uptime24h;
+      uptimeCount++;
+    }
 
-    allIncidents.push(...extractIncidents(ep.name, groupName, results));
+    if (Array.isArray(ep.incidents)) {
+      ep.incidents.forEach(inc => {
+        allIncidents.push({
+          ...inc,
+          service: ep.name,
+          group: groupName
+        });
+      });
+    }
   });
 
   allIncidents.sort((a, b) => {
@@ -157,7 +161,7 @@ function renderDashboard(endpoints) {
     dom.bannerMsg.textContent = `Degradacja usług: ${downCount} z ${endpoints.length} komponentów OFFLINE.`;
   }
 
-  const avgUptime = totalChecks > 0 ? ((totalSuccess / totalChecks) * 100).toFixed(2) : "0.00";
+  const avgUptime = uptimeCount > 0 ? (uptimeSum / uptimeCount).toFixed(2) : "0.00";
   const medianLatency = calcMedian(currentLatencies);
 
   dom.statOnline.textContent = `${onlineCount}/${endpoints.length}`;
@@ -173,7 +177,7 @@ function renderDashboard(endpoints) {
     const panel = document.createElement("section");
     panel.className = "group-panel";
 
-    const groupOnline = items.filter(i => i.results?.at(-1)?.success).length;
+    const groupOnline = items.filter(i => i.last?.success).length;
     panel.innerHTML = `
       <div class="panel-bar">
         <span>:: ${escapeHtml(groupName)}</span>
@@ -182,7 +186,7 @@ function renderDashboard(endpoints) {
       <div class="srv-table-head">
         <span>STAN</span>
         <span>USŁUGA</span>
-        <span>HISTORIA (60 PRÓBEK)</span>
+        <span>HISTORIA 24H (60 × 24M)</span>
         <span>UPTIME</span>
         <span>PING</span>
       </div>
@@ -204,20 +208,13 @@ function renderDashboard(endpoints) {
 }
 
 function createServiceRow(ep) {
-  const results = ep.results || [];
-  const last = results[results.length - 1];
+  const last = ep.last;
   const isUp = Boolean(last && last.success);
   const isWgHs = ep.key === "wg-hs";
   const unit = isWgHs ? "s" : "ms";
   const nowVal = last && typeof last.duration === "number" ? last.duration : 0;
+  const uptimePct = typeof ep.uptime24h === "number" ? ep.uptime24h.toFixed(1) : "0.0";
 
-  const okResults = results.filter(r => r.success);
-  const uptimePct = results.length > 0 ? ((okResults.length / results.length) * 100).toFixed(0) : "0";
-  const durations = okResults.map(r => r.duration).filter(d => typeof d === "number");
-  const avgVal = durations.length > 0 ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0;
-  const maxVal = durations.length > 0 ? Math.max(...durations) : 0;
-
-  // Klasyfikacja stanu wiersza: OK / SLOW / FAIL
   let stateClass = "ok";
   let stateLabel = "[ OK ]";
   if (!isUp) {
@@ -238,8 +235,16 @@ function createServiceRow(ep) {
     protoText = "TIMEOUT";
   }
 
-  const slice = results.slice(-MAX_BARS);
-  const padded = Array(Math.max(0, MAX_BARS - slice.length)).fill(null).concat(slice);
+  const buckets = Array.isArray(ep.buckets) ? ep.buckets.slice(-MAX_BARS) : [];
+  const padded = Array(Math.max(0, MAX_BARS - buckets.length)).fill(null).concat(buckets);
+
+  const validBuckets = buckets.filter(Boolean);
+  const avg24 = validBuckets.length > 0
+    ? Math.round(validBuckets.reduce((a, b) => a + b.duration, 0) / validBuckets.length)
+    : 0;
+  const max24 = validBuckets.length > 0
+    ? Math.max(...validBuckets.map(b => b.duration))
+    : 0;
 
   const row = document.createElement("div");
   row.className = "srv-row";
@@ -250,31 +255,31 @@ function createServiceRow(ep) {
   const barsContainer = document.createElement("div");
   barsContainer.className = "spark-bars";
 
-  padded.forEach(r => {
+  padded.forEach(b => {
     const bar = document.createElement("div");
-    if (!r) {
+    if (!b) {
       bar.className = "bar";
-      bar.dataset.tip = "Brak próbki w oknie";
+      bar.dataset.tip = "Brak pomiarów w tym 24-min oknie";
     } else {
-      const val = typeof r.duration === "number" ? r.duration : 0;
-      const tier = classifyBar(r.success, val, isWgHs);
+      const val = typeof b.duration === "number" ? b.duration : 0;
+      const tier = classifyBar(b.success, val, isWgHs);
       bar.className = `bar ${tier.cls}`;
       bar.style.height = `${tier.heightPct}%`;
 
-      const time = new Date(r.timestamp).toLocaleTimeString("pl-PL");
-      const statusPart = isWgHs
-        ? `Handshake: ${val}s`
-        : (r.status > 0 ? `HTTP ${r.status}` : (r.success ? "TCP/ICMP OK" : "TIMEOUT"));
-      const errPart = getFailureReason(r);
-      bar.dataset.tip = `[${time}] ${r.success ? "OK" : "FAIL"} | ${statusPart}${isWgHs ? "" : " | " + val + " ms"}${errPart ? " | " + errPart : ""}`;
+      const tStart = formatTimeHM(b.b_start);
+      const tEnd = formatTimeHM(b.b_end);
+      const ratio = `${b.ok}/${b.total} OK`;
+      const durPart = isWgHs ? `śr. HS: ${val}s` : `śr. ${val} ms`;
+      const errPart = !b.success && b.error ? ` | ${b.error}` : "";
+      bar.dataset.tip = `[${tStart}–${tEnd}] ${ratio} | ${durPart}${errPart}`;
     }
     barsContainer.appendChild(bar);
   });
 
   const pingText = !isUp ? "TIMEOUT" : `${nowVal} ${unit}`;
   const pingTip = isWgHs
-    ? `Wiek ostatniego handshake'u: ${nowVal}s (śr: ${avgVal}s, max: ${maxVal}s)`
-    : `Teraz: ${nowVal} ms | Średnia w oknie: ${avgVal} ms | Szczyt: ${maxVal} ms`;
+    ? `Teraz: ${nowVal}s | Średnia 24h: ${avg24}s | Max 24h: ${max24}s`
+    : `Teraz: ${nowVal} ms | Średnia 24h: ${avg24} ms | Max kubełka 24h: ${max24} ms`;
 
   mainLine.innerHTML = `
     <span class="state-pill ${stateClass}">${stateLabel}</span>
@@ -309,7 +314,6 @@ function createServiceRow(ep) {
   return row;
 }
 
-// Skalowanie wysokości słupka logarytmicznie (20ms -> 25%, 150ms -> 55%, 1000ms+ -> 100%)
 function classifyBar(success, val, isWgHs) {
   if (!success) {
     return { cls: "crit", heightPct: 100 };
@@ -319,7 +323,7 @@ function classifyBar(success, val, isWgHs) {
     return { cls: val >= WG_HS_WARN_SEC ? "slow" : "ok", heightPct: pct };
   }
   const clamped = Math.max(10, Math.min(1500, val));
-  const norm = Math.log10(clamped / 10) / Math.log10(150); // 0.0 .. 1.0
+  const norm = Math.log10(clamped / 10) / Math.log10(150);
   const heightPct = Math.round(22 + norm * 78);
 
   if (val >= LATENCY_CRIT_MS) return { cls: "crit", heightPct: 100 };
@@ -348,45 +352,9 @@ function getFailureReason(result) {
   return parts.join(" | ");
 }
 
-function extractIncidents(serviceName, groupName, results) {
-  const incidents = [];
-  let current = null;
-
-  results.forEach(r => {
-    if (!r.success) {
-      const reason = getFailureReason(r) || (r.status > 0 ? `HTTP ${r.status}` : "Connection failed");
-      if (!current) {
-        current = {
-          service: serviceName,
-          group: groupName,
-          start: r.timestamp,
-          end: r.timestamp,
-          count: 1,
-          lastStatus: r.status,
-          reason: reason,
-          ongoing: true
-        };
-      } else {
-        current.end = r.timestamp;
-        current.count++;
-        if (r.status > 0) current.lastStatus = r.status;
-        if (reason) current.reason = reason;
-      }
-    } else if (current) {
-      current.end = r.timestamp;
-      current.ongoing = false;
-      incidents.push(current);
-      current = null;
-    }
-  });
-
-  if (current) incidents.push(current);
-  return incidents;
-}
-
 function renderIncidents(incidents) {
   if (incidents.length === 0) {
-    dom.incidentsList.innerHTML = `<div class="log-empty">&gt; Brak zarejestrowanych incydentów w bieżącym oknie telemetrycznym.</div>`;
+    dom.incidentsList.innerHTML = `<div class="log-empty">&gt; Brak zarejestrowanych incydentów w ostatnich 24 godzinach.</div>`;
     return;
   }
 
@@ -414,6 +382,13 @@ function renderIncidents(incidents) {
       </div>
     `;
   }).join("");
+}
+
+function formatTimeHM(epochSec) {
+  return new Date(epochSec * 1000).toLocaleTimeString("pl-PL", {
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
 function formatDateTime(iso) {
