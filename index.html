@@ -1,70 +1,81 @@
 <!DOCTYPE html>
-<html lang="pl">
+<html lang="pl" data-theme="phosphor">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>awumii.pl // system telemetry</title>
+  <title>AWUMII.PL // SYS-MON v2.4</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
-  <div class="crt-overlay" aria-hidden="true"></div>
+  <div class="crt-scanlines" aria-hidden="true"></div>
 
-  <main class="container">
-    <header class="top-bar">
-      <div class="brand">
-        <span class="prompt">root@awumii.pl:~#</span>
-        <h1>./status --live --telemetry</h1>
+  <main class="terminal">
+    <header class="sys-header">
+      <div class="sys-title">
+        <span class="badge-inv">AWUMII.PL</span>
+        <span>NODE TELEMETRY MONITOR</span>
       </div>
-      <div class="conn-status" id="conn-box">
-        <span class="led" id="conn-dot"></span>
-        <span id="conn-text">INIT_WSS...</span>
+      <div class="sys-controls">
+        <button type="button" class="theme-btn" id="theme-toggle" title="Zmień kolor luminoforu">CRT: P31_GREEN</button>
+        <span class="conn-pill" id="conn-box">
+          <span id="conn-dot">●</span>
+          <span id="conn-text">WSS_INIT</span>
+        </span>
       </div>
     </header>
 
-    <section id="global-banner" class="banner pending">
-      <span class="banner-tag">[WAIT]</span>
-      <span id="banner-msg">Oczekiwanie na strumień telemetrii z węzła VPS...</span>
+    <section id="global-banner" class="status-bar pending">
+      <span class="status-code" id="banner-tag">[ WAIT ]</span>
+      <span id="banner-msg">Oczekiwanie na ramkę telemetryczną z węzła VPS...</span>
     </section>
 
-    <section class="summary-strip" id="summary-strip">
-      <div class="stat-box">
-        <span class="stat-label">ONLINE</span>
-        <span class="stat-val" id="stat-online">--/--</span>
+    <section class="kpi-grid" aria-label="Podsumowanie węzła">
+      <div class="kpi-cell">
+        <span class="kpi-label">USŁUGI ONLINE</span>
+        <span class="kpi-value" id="stat-online">--/--</span>
       </div>
-      <div class="stat-box">
-        <span class="stat-label">ŚR. UPTIME (OKNO)</span>
-        <span class="stat-val" id="stat-uptime">--%</span>
+      <div class="kpi-cell">
+        <span class="kpi-label">DOSTĘPNOŚĆ (OKNO)</span>
+        <span class="kpi-value" id="stat-uptime">--%</span>
       </div>
-      <div class="stat-box">
-        <span class="stat-label">ŚR. LATENCY</span>
-        <span class="stat-val" id="stat-latency">-- ms</span>
+      <div class="kpi-cell">
+        <span class="kpi-label">MEDIANA PINGU (TERAZ)</span>
+        <span class="kpi-value" id="stat-latency">-- ms</span>
       </div>
-      <div class="stat-box">
-        <span class="stat-label">INCYDENTY</span>
-        <span class="stat-val" id="stat-incidents">--</span>
+      <div class="kpi-cell">
+        <span class="kpi-label">INCYDENTY</span>
+        <span class="kpi-value" id="stat-incidents">--</span>
       </div>
     </section>
+
+    <div class="legend-strip">
+      <span>HISTORIA (60 PRÓBEK):</span>
+      <span><i class="lg-box ok"></i> &lt;150ms</span>
+      <span><i class="lg-box slow"></i> 150–600ms</span>
+      <span><i class="lg-box crit"></i> &gt;600ms / FAIL</span>
+      <span class="legend-hint">[najedź na słupek lub ping po szczegóły]</span>
+    </div>
 
     <div id="app"></div>
 
-    <section class="incidents-section">
-      <div class="section-header">
-        <h2>// DZIENNIK INCYDENTÓW (WYKRYTE ANOMALIE Z HISTORII GATUS)</h2>
-        <span class="hint" id="incident-window">okno: ostatnie 120 próbek / usługę</span>
+    <section class="log-panel">
+      <div class="panel-bar">
+        <span>DZIENNIK INCYDENTÓW (GATUS HISTORY)</span>
+        <span id="incident-window">OKNO: 120 PRÓBEK</span>
       </div>
-      <div id="incidents-list" class="incidents-list">
-        <div class="empty-log">Analiza logów pomiarowych...</div>
+      <div id="incidents-list" class="log-body">
+        <div class="log-empty">Brak danych w buforze...</div>
       </div>
     </section>
 
-    <footer class="footer">
-      <span>SRC: GATUS_SQLITE -&gt; MQTT_WSS</span>
-      <span id="last-update">LAST_SYNC: NEVER</span>
+    <footer class="sys-footer">
+      <span>BUS: GATUS_SQLITE -&gt; MQTT_WSS</span>
+      <span id="last-update">VPS_HEARTBEAT: --:--:--</span>
     </footer>
   </main>
 
-  <div id="tooltip" class="tooltip hidden"></div>
+  <div id="tooltip" class="crt-tooltip hidden"></div>
 </body>
 </html>

@@ -3,14 +3,25 @@ const BROKER_URL = "wss://broker.emqx.io:8084/mqtt";
 const MAX_BARS = 60;
 const STALE_THRESHOLD_SEC = 45;
 
+// Progi czytelności pingu (ms) oraz wieku handshake WireGuard (s)
+const LATENCY_WARN_MS = 150;
+const LATENCY_CRIT_MS = 600;
+const WG_HS_WARN_SEC = 135;
+
+const THEMES = [
+  { id: "phosphor", label: "CRT: P31_GREEN" },
+  { id: "amber", label: "CRT: P3_AMBER" },
+  { id: "ice", label: "TERM: ICE_MONO" }
+];
+
 let lastVpsTs = null;
 let lastEndpoints = null;
 
 const dom = {
-  dot: document.getElementById("conn-dot"),
+  connBox: document.getElementById("conn-box"),
   connText: document.getElementById("conn-text"),
   banner: document.getElementById("global-banner"),
-  bannerTag: document.querySelector(".banner-tag"),
+  bannerTag: document.getElementById("banner-tag"),
   bannerMsg: document.getElementById("banner-msg"),
   app: document.getElementById("app"),
   incidentsList: document.getElementById("incidents-list"),
@@ -19,8 +30,28 @@ const dom = {
   statUptime: document.getElementById("stat-uptime"),
   statLatency: document.getElementById("stat-latency"),
   statIncidents: document.getElementById("stat-incidents"),
-  tooltip: document.getElementById("tooltip")
+  tooltip: document.getElementById("tooltip"),
+  themeBtn: document.getElementById("theme-toggle")
 };
+
+// Przełącznik luminoforu CRT
+(function initTheme() {
+  const saved = localStorage.getItem("awumii_crt_theme") || "phosphor";
+  applyTheme(saved);
+  dom.themeBtn.addEventListener("click", () => {
+    const cur = document.documentElement.dataset.theme || "phosphor";
+    const idx = THEMES.findIndex(t => t.id === cur);
+    const next = THEMES[(idx + 1) % THEMES.length];
+    applyTheme(next.id);
+  });
+})();
+
+function applyTheme(id) {
+  const found = THEMES.find(t => t.id === id) || THEMES[0];
+  document.documentElement.dataset.theme = found.id;
+  dom.themeBtn.textContent = found.label;
+  localStorage.setItem("awumii_crt_theme", found.id);
+}
 
 const client = mqtt.connect(BROKER_URL, {
   clientId: "awumii_tui_" + Math.random().toString(16).slice(2, 10),
@@ -29,19 +60,19 @@ const client = mqtt.connect(BROKER_URL, {
 });
 
 client.on("connect", () => {
-  dom.dot.className = "led connected";
-  dom.connText.textContent = "LIVE // WSS_CONNECTED";
+  dom.connBox.className = "conn-pill connected";
+  dom.connText.textContent = "WSS_LIVE";
   client.subscribe(MQTT_TOPIC);
 });
 
 client.on("reconnect", () => {
-  dom.dot.className = "led";
-  dom.connText.textContent = "RECONNECTING...";
+  dom.connBox.className = "conn-pill";
+  dom.connText.textContent = "RECONNECT";
 });
 
 client.on("error", () => {
-  dom.dot.className = "led error";
-  dom.connText.textContent = "ERR // BROKER_FAIL";
+  dom.connBox.className = "conn-pill error";
+  dom.connText.textContent = "WSS_ERR";
 });
 
 client.on("message", (_topic, payload) => {
@@ -69,10 +100,10 @@ function checkHeartbeat() {
   const ageSec = Math.max(0, Math.floor(Date.now() / 1000) - lastVpsTs);
 
   if (ageSec > STALE_THRESHOLD_SEC) {
-    dom.banner.className = "banner degraded";
-    dom.bannerTag.textContent = "[CRIT // VPS_DOWN]";
-    dom.bannerMsg.textContent = `UTRACONO PULS Z WĘZŁA VPS (ostatni kontakt: ${formatDuration(ageSec)} temu) — dane poniżej są nieaktualne!`;
-    dom.app.style.opacity = "0.55";
+    dom.banner.className = "status-bar degraded";
+    dom.bannerTag.textContent = "[ CRIT ]";
+    dom.bannerMsg.textContent = `BRAK PULSU Z WĘZŁA VPS (ostatni kontakt: ${formatDuration(ageSec)} temu) — dane poniżej są zamrożone!`;
+    dom.app.style.opacity = "0.5";
   } else {
     dom.app.style.opacity = "1";
   }
@@ -82,8 +113,7 @@ function renderDashboard(endpoints) {
   let onlineCount = 0;
   let totalChecks = 0;
   let totalSuccess = 0;
-  let latencySum = 0;
-  let latencyCount = 0;
+  const currentLatencies = [];
 
   const groups = {};
   const allIncidents = [];
@@ -95,17 +125,16 @@ function renderDashboard(endpoints) {
 
     const results = ep.results || [];
     const last = results[results.length - 1];
-    if (last && last.success) onlineCount++;
+    if (last && last.success) {
+      onlineCount++;
+      if (ep.key !== "wg-hs" && typeof last.duration === "number" && last.duration > 0) {
+        currentLatencies.push(last.duration);
+      }
+    }
 
     results.forEach(r => {
       totalChecks++;
-      if (r.success) {
-        totalSuccess++;
-        if (ep.key !== "wg-hs" && typeof r.duration === "number" && r.duration > 0) {
-          latencySum += r.duration;
-          latencyCount++;
-        }
-      }
+      if (r.success) totalSuccess++;
     });
 
     allIncidents.push(...extractIncidents(ep.name, groupName, results));
@@ -118,44 +147,52 @@ function renderDashboard(endpoints) {
 
   const allUp = onlineCount === endpoints.length && endpoints.length > 0;
   if (allUp) {
-    dom.banner.className = "banner all-ok";
-    dom.bannerTag.textContent = "[OK]";
+    dom.banner.className = "status-bar all-ok";
+    dom.bannerTag.textContent = "[  OK  ]";
     dom.bannerMsg.textContent = "Wszystkie systemy operacyjne — brak wykrytych anomalii.";
   } else {
     const downCount = endpoints.length - onlineCount;
-    dom.banner.className = "banner degraded";
-    dom.bannerTag.textContent = "[WARN]";
-    dom.bannerMsg.textContent = `Wykryto degradację usług (${downCount} z ${endpoints.length} komponentów OFFLINE).`;
+    dom.banner.className = "status-bar degraded";
+    dom.bannerTag.textContent = "[ WARN ]";
+    dom.bannerMsg.textContent = `Degradacja usług: ${downCount} z ${endpoints.length} komponentów OFFLINE.`;
   }
 
   const avgUptime = totalChecks > 0 ? ((totalSuccess / totalChecks) * 100).toFixed(2) : "0.00";
-  const avgLatency = latencyCount > 0 ? Math.round(latencySum / latencyCount) : 0;
+  const medianLatency = calcMedian(currentLatencies);
 
   dom.statOnline.textContent = `${onlineCount}/${endpoints.length}`;
   dom.statOnline.style.color = allUp ? "var(--ok)" : "var(--fail)";
   dom.statUptime.textContent = `${avgUptime}%`;
-  dom.statLatency.textContent = `${avgLatency} ms`;
+  dom.statLatency.textContent = `${medianLatency} ms`;
+  dom.statLatency.style.color = medianLatency > LATENCY_WARN_MS ? "var(--warn)" : "var(--fg)";
   dom.statIncidents.textContent = allIncidents.length;
-  dom.statIncidents.style.color = allIncidents.some(i => i.ongoing) ? "var(--fail)" : "var(--text)";
+  dom.statIncidents.style.color = allIncidents.some(i => i.ongoing) ? "var(--fail)" : "var(--fg)";
 
   dom.app.innerHTML = "";
   for (const [groupName, items] of Object.entries(groups)) {
-    const groupEl = document.createElement("section");
-    groupEl.className = "group-block";
+    const panel = document.createElement("section");
+    panel.className = "group-panel";
 
     const groupOnline = items.filter(i => i.results?.at(-1)?.success).length;
-    groupEl.innerHTML = `
-      <div class="group-header">
-        <span>// ${escapeHtml(groupName)}</span>
+    panel.innerHTML = `
+      <div class="panel-bar">
+        <span>:: ${escapeHtml(groupName)}</span>
         <span>${groupOnline}/${items.length} UP</span>
+      </div>
+      <div class="srv-table-head">
+        <span>STAN</span>
+        <span>USŁUGA</span>
+        <span>HISTORIA (60 PRÓBEK)</span>
+        <span>UPTIME</span>
+        <span>PING</span>
       </div>
     `;
 
     items.forEach(ep => {
-      groupEl.appendChild(createServiceCard(ep));
+      panel.appendChild(createServiceRow(ep));
     });
 
-    dom.app.appendChild(groupEl);
+    dom.app.appendChild(panel);
   }
 
   renderIncidents(allIncidents);
@@ -166,92 +203,137 @@ function renderDashboard(endpoints) {
   dom.lastUpdate.textContent = `VPS_HEARTBEAT: ${syncTime}`;
 }
 
-function createServiceCard(ep) {
+function createServiceRow(ep) {
   const results = ep.results || [];
   const last = results[results.length - 1];
   const isUp = Boolean(last && last.success);
   const isWgHs = ep.key === "wg-hs";
   const unit = isWgHs ? "s" : "ms";
+  const nowVal = last && typeof last.duration === "number" ? last.duration : 0;
 
   const okResults = results.filter(r => r.success);
-  const uptimePct = results.length > 0 ? ((okResults.length / results.length) * 100).toFixed(1) : "0.0";
+  const uptimePct = results.length > 0 ? ((okResults.length / results.length) * 100).toFixed(0) : "0";
   const durations = okResults.map(r => r.duration).filter(d => typeof d === "number");
   const avgVal = durations.length > 0 ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0;
   const maxVal = durations.length > 0 ? Math.max(...durations) : 0;
 
-  let codeText = isWgHs ? "WG_L3" : "TCP/ICMP";
-  let codeClass = isUp ? "code-ok" : "code-err";
+  // Klasyfikacja stanu wiersza: OK / SLOW / FAIL
+  let stateClass = "ok";
+  let stateLabel = "[ OK ]";
+  if (!isUp) {
+    stateClass = "down";
+    stateLabel = "[FAIL]";
+  } else if (!isWgHs && nowVal >= LATENCY_CRIT_MS) {
+    stateClass = "down";
+    stateLabel = "[LAG!]";
+  } else if ((!isWgHs && nowVal >= LATENCY_WARN_MS) || (isWgHs && nowVal >= WG_HS_WARN_SEC)) {
+    stateClass = "slow";
+    stateLabel = "[SLOW]";
+  }
+
+  let protoText = isWgHs ? "WG_L3" : "TCP/ICMP";
   if (!isWgHs && last && typeof last.status === "number" && last.status > 0) {
-    codeText = `HTTP ${last.status}`;
+    protoText = `HTTP ${last.status}`;
   } else if (!isWgHs && last && !last.success) {
-    codeText = "NO_RESP";
+    protoText = "TIMEOUT";
   }
 
   const slice = results.slice(-MAX_BARS);
   const padded = Array(Math.max(0, MAX_BARS - slice.length)).fill(null).concat(slice);
 
-  const card = document.createElement("article");
-  card.className = `card ${isUp ? "is-up" : "is-down"}`;
+  const row = document.createElement("div");
+  row.className = "srv-row";
+
+  const mainLine = document.createElement("div");
+  mainLine.className = "srv-main";
 
   const barsContainer = document.createElement("div");
-  barsContainer.className = "bars";
+  barsContainer.className = "spark-bars";
 
   padded.forEach(r => {
     const bar = document.createElement("div");
     if (!r) {
       bar.className = "bar";
-      bar.dataset.tip = "Brak próbki w buforze";
+      bar.dataset.tip = "Brak próbki w oknie";
     } else {
-      bar.className = `bar ${r.success ? "up" : "down"}`;
+      const val = typeof r.duration === "number" ? r.duration : 0;
+      const tier = classifyBar(r.success, val, isWgHs);
+      bar.className = `bar ${tier.cls}`;
+      bar.style.height = `${tier.heightPct}%`;
+
       const time = new Date(r.timestamp).toLocaleTimeString("pl-PL");
       const statusPart = isWgHs
-        ? `Handshake age: ${r.duration}s`
-        : (r.status > 0 ? `HTTP ${r.status}` : (r.success ? "CONNECTED" : "TIMEOUT/ERR"));
+        ? `Handshake: ${val}s`
+        : (r.status > 0 ? `HTTP ${r.status}` : (r.success ? "TCP/ICMP OK" : "TIMEOUT"));
       const errPart = getFailureReason(r);
-      bar.dataset.tip = `[${time}] ${r.success ? "OK" : "FAIL"} | ${statusPart}${isWgHs ? "" : " | " + r.duration + " ms"}${errPart ? " | " + errPart : ""}`;
+      bar.dataset.tip = `[${time}] ${r.success ? "OK" : "FAIL"} | ${statusPart}${isWgHs ? "" : " | " + val + " ms"}${errPart ? " | " + errPart : ""}`;
     }
     barsContainer.appendChild(bar);
   });
 
-  let errorBannerHtml = "";
-  if (!isUp && last) {
-    const reason = getFailureReason(last) || (last.status > 0 ? `Otrzymano nieoczekiwany kod HTTP ${last.status}` : "Brak odpowiedzi z hosta docelowego");
-    errorBannerHtml = `<div class="error-line">&gt; ERR_DETAIL: ${escapeHtml(reason)}</div>`;
-  }
+  const pingText = !isUp ? "TIMEOUT" : `${nowVal} ${unit}`;
+  const pingTip = isWgHs
+    ? `Wiek ostatniego handshake'u: ${nowVal}s (śr: ${avgVal}s, max: ${maxVal}s)`
+    : `Teraz: ${nowVal} ms | Średnia w oknie: ${avgVal} ms | Szczyt: ${maxVal} ms`;
 
-  const firstTime = slice[0] ? new Date(slice[0].timestamp).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" }) : "--:--";
-  const lastTime = last ? new Date(last.timestamp).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" }) : "--:--";
-
-  card.innerHTML = `
-    <div class="card-top">
-      <div class="service-left">
-        <span class="service-name">${escapeHtml(ep.name)}</span>
-        <span class="http-badge ${codeClass}">${codeText}</span>
-      </div>
-      <div class="meta">
-        <span class="meta-item">UP: <strong>${uptimePct}%</strong></span>
-        <span class="meta-item">NOW: <strong>${last ? last.duration : 0}${unit}</strong></span>
-        <span class="meta-item">AVG/MAX: <strong>${avgVal}/${maxVal}${unit}</strong></span>
-        <span class="status-tag ${isUp ? "up" : "down"}">${isUp ? "ONLINE" : "OFFLINE"}</span>
-      </div>
+  mainLine.innerHTML = `
+    <span class="state-pill ${stateClass}">${stateLabel}</span>
+    <div class="srv-ident">
+      <span class="srv-name">${escapeHtml(ep.name)}</span>
+      <span class="srv-proto ${isUp ? "" : "err"}">${protoText}</span>
     </div>
   `;
+  mainLine.appendChild(barsContainer);
 
-  card.appendChild(barsContainer);
+  const uptimeEl = document.createElement("span");
+  uptimeEl.className = "srv-uptime";
+  uptimeEl.textContent = `${uptimePct}%`;
 
-  const bottomRow = document.createElement("div");
-  bottomRow.className = "card-bottom";
-  bottomRow.innerHTML = `
-    <span>${firstTime} (${slice.length} próbek)</span>
-    <span>${lastTime}</span>
-  `;
-  card.appendChild(bottomRow);
+  const pingEl = document.createElement("span");
+  pingEl.className = `srv-ping ${stateClass}`;
+  pingEl.textContent = pingText;
+  pingEl.dataset.tip = pingTip;
 
-  if (errorBannerHtml) {
-    card.insertAdjacentHTML("beforeend", errorBannerHtml);
+  mainLine.appendChild(uptimeEl);
+  mainLine.appendChild(pingEl);
+  row.appendChild(mainLine);
+
+  if (!isUp && last) {
+    const reason = getFailureReason(last) || (last.status > 0 ? `Otrzymano kod HTTP ${last.status}` : "Brak odpowiedzi z hosta docelowego");
+    const errDiv = document.createElement("div");
+    errDiv.className = "srv-err-line";
+    errDiv.textContent = `> ERR: ${reason}`;
+    row.appendChild(errDiv);
   }
 
-  return card;
+  return row;
+}
+
+// Skalowanie wysokości słupka logarytmicznie (20ms -> 25%, 150ms -> 55%, 1000ms+ -> 100%)
+function classifyBar(success, val, isWgHs) {
+  if (!success) {
+    return { cls: "crit", heightPct: 100 };
+  }
+  if (isWgHs) {
+    const pct = Math.min(100, Math.max(25, Math.round((val / 150) * 100)));
+    return { cls: val >= WG_HS_WARN_SEC ? "slow" : "ok", heightPct: pct };
+  }
+  const clamped = Math.max(10, Math.min(1500, val));
+  const norm = Math.log10(clamped / 10) / Math.log10(150); // 0.0 .. 1.0
+  const heightPct = Math.round(22 + norm * 78);
+
+  if (val >= LATENCY_CRIT_MS) return { cls: "crit", heightPct: 100 };
+  if (val >= LATENCY_WARN_MS) return { cls: "slow", heightPct };
+  return { cls: "ok", heightPct };
+}
+
+function calcMedian(arr) {
+  if (!arr.length) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 !== 0
+    ? Math.round(sorted[mid])
+    : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
 }
 
 function getFailureReason(result) {
@@ -261,7 +343,7 @@ function getFailureReason(result) {
     parts.push(result.errors.join("; "));
   }
   if (Array.isArray(result.failedConditions) && result.failedConditions.length > 0) {
-    parts.push("niespełniony warunek: " + result.failedConditions.join(", "));
+    parts.push("warunek: " + result.failedConditions.join(", "));
   }
   return parts.join(" | ");
 }
@@ -298,16 +380,13 @@ function extractIncidents(serviceName, groupName, results) {
     }
   });
 
-  if (current) {
-    incidents.push(current);
-  }
-
+  if (current) incidents.push(current);
   return incidents;
 }
 
 function renderIncidents(incidents) {
   if (incidents.length === 0) {
-    dom.incidentsList.innerHTML = `<div class="empty-log">&gt; Brak zarejestrowanych incydentów w bieżącym oknie telemetrycznym.</div>`;
+    dom.incidentsList.innerHTML = `<div class="log-empty">&gt; Brak zarejestrowanych incydentów w bieżącym oknie telemetrycznym.</div>`;
     return;
   }
 
@@ -316,21 +395,21 @@ function renderIncidents(incidents) {
     const endFmt = inc.ongoing ? "TERAZ" : formatDateTime(inc.end);
     const durSec = Math.max(0, Math.round((new Date(inc.end) - new Date(inc.start)) / 1000));
     const durText = formatDuration(durSec);
-    const codeInfo = inc.lastStatus > 0 ? `Kod: HTTP ${inc.lastStatus}` : "Kod: Brak połączenia";
+    const codeInfo = inc.lastStatus > 0 ? `HTTP ${inc.lastStatus}` : "TIMEOUT";
 
     return `
-      <div class="incident-item ${inc.ongoing ? "ongoing" : ""}">
-        <div class="incident-head">
-          <span class="incident-title">[${escapeHtml(inc.group)}] ${escapeHtml(inc.service)}</span>
-          <span class="incident-badge ${inc.ongoing ? "ongoing" : "resolved"}">
-            ${inc.ongoing ? "AKTYWNA AWARIA" : "ROZWIĄZANO"}
+      <div class="log-entry ${inc.ongoing ? "ongoing" : ""}">
+        <div class="log-entry-head">
+          <span>[${escapeHtml(inc.group)}] ${escapeHtml(inc.service)}</span>
+          <span class="log-tag ${inc.ongoing ? "ongoing" : "resolved"}">
+            ${inc.ongoing ? "[ AKTYWNA AWARIA ]" : "[ ROZWIĄZANO ]"}
           </span>
         </div>
-        <div class="incident-details">
-          <span>Czas: ${startFmt} → ${endFmt} (${durText})</span>
-          <span>Nieudane próby: ${inc.count}</span>
-          <span>${codeInfo}</span>
-          <span>Powód: ${escapeHtml(inc.reason)}</span>
+        <div class="log-entry-meta">
+          <span>${startFmt} → ${endFmt} (${durText})</span>
+          <span>Próby: ${inc.count}</span>
+          <span>Kod: ${codeInfo}</span>
+          <span>${escapeHtml(inc.reason)}</span>
         </div>
       </div>
     `;
@@ -364,22 +443,22 @@ function escapeHtml(str) {
 }
 
 document.addEventListener("mouseover", e => {
-  const bar = e.target.closest(".bar");
-  if (!bar || !bar.dataset.tip) return;
-  dom.tooltip.textContent = bar.dataset.tip;
+  const target = e.target.closest("[data-tip]");
+  if (!target) return;
+  dom.tooltip.textContent = target.dataset.tip;
   dom.tooltip.classList.remove("hidden");
 });
 
 document.addEventListener("mousemove", e => {
   if (dom.tooltip.classList.contains("hidden")) return;
-  const x = Math.min(window.innerWidth - 335, e.clientX + 12);
-  const y = Math.max(10, e.clientY - 38);
+  const x = Math.min(window.innerWidth - 350, e.clientX + 12);
+  const y = Math.max(10, e.clientY - 36);
   dom.tooltip.style.left = `${x}px`;
   dom.tooltip.style.top = `${y}px`;
 });
 
 document.addEventListener("mouseout", e => {
-  if (e.target.closest(".bar")) {
+  if (e.target.closest("[data-tip]")) {
     dom.tooltip.classList.add("hidden");
   }
 });
