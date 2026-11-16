@@ -1,6 +1,10 @@
 const MQTT_TOPIC = "awumii/status/1bec2409314ba39f47f4db73b81bdb3a0af2a9c3805d5e63";
 const BROKER_URL = "wss://broker.emqx.io:8084/mqtt";
-const MAX_BARS = 60; // Ile ostatnich słupków rysować na karcie
+const MAX_BARS = 60;
+const STALE_THRESHOLD_SEC = 45;
+
+let lastVpsTs = null;
+let lastEndpoints = null;
 
 const dom = {
   dot: document.getElementById("conn-dot"),
@@ -42,12 +46,37 @@ client.on("error", () => {
 
 client.on("message", (_topic, payload) => {
   try {
-    const endpoints = JSON.parse(payload.toString());
-    renderDashboard(endpoints);
+    const parsed = JSON.parse(payload.toString());
+    if (Array.isArray(parsed)) {
+      lastEndpoints = parsed;
+      const latestSample = parsed[0]?.results?.at(-1)?.timestamp;
+      lastVpsTs = latestSample ? Math.floor(new Date(latestSample).getTime() / 1000) : null;
+    } else {
+      lastVpsTs = parsed.vps_ts;
+      lastEndpoints = parsed.endpoints || [];
+    }
+    renderDashboard(lastEndpoints);
+    checkHeartbeat();
   } catch (err) {
     console.error("JSON parse error:", err);
   }
 });
+
+setInterval(checkHeartbeat, 1000);
+
+function checkHeartbeat() {
+  if (!lastVpsTs || !lastEndpoints) return;
+  const ageSec = Math.max(0, Math.floor(Date.now() / 1000) - lastVpsTs);
+
+  if (ageSec > STALE_THRESHOLD_SEC) {
+    dom.banner.className = "banner degraded";
+    dom.bannerTag.textContent = "[CRIT // VPS_DOWN]";
+    dom.bannerMsg.textContent = `UTRACONO PULS Z WĘZŁA VPS (ostatni kontakt: ${formatDuration(ageSec)} temu) — dane poniżej są nieaktualne!`;
+    dom.app.style.opacity = "0.55";
+  } else {
+    dom.app.style.opacity = "1";
+  }
+}
 
 function renderDashboard(endpoints) {
   let onlineCount = 0;
@@ -72,24 +101,21 @@ function renderDashboard(endpoints) {
       totalChecks++;
       if (r.success) {
         totalSuccess++;
-        if (typeof r.duration === "number" && r.duration > 0) {
+        if (ep.key !== "wg-hs" && typeof r.duration === "number" && r.duration > 0) {
           latencySum += r.duration;
           latencyCount++;
         }
       }
     });
 
-    // Wyciągamy incydenty (ciągi kolejnych nieudanych prób) dla danej usługi
     allIncidents.push(...extractIncidents(ep.name, groupName, results));
   });
 
-  // Sortujemy incydenty od najnowszych (trwające zawsze na samej górze)
   allIncidents.sort((a, b) => {
     if (a.ongoing !== b.ongoing) return a.ongoing ? -1 : 1;
     return new Date(b.start) - new Date(a.start);
   });
 
-  // Aktualizacja banera
   const allUp = onlineCount === endpoints.length && endpoints.length > 0;
   if (allUp) {
     dom.banner.className = "banner all-ok";
@@ -102,7 +128,6 @@ function renderDashboard(endpoints) {
     dom.bannerMsg.textContent = `Wykryto degradację usług (${downCount} z ${endpoints.length} komponentów OFFLINE).`;
   }
 
-  // Pasek statystyk globalnych
   const avgUptime = totalChecks > 0 ? ((totalSuccess / totalChecks) * 100).toFixed(2) : "0.00";
   const avgLatency = latencyCount > 0 ? Math.round(latencySum / latencyCount) : 0;
 
@@ -113,7 +138,6 @@ function renderDashboard(endpoints) {
   dom.statIncidents.textContent = allIncidents.length;
   dom.statIncidents.style.color = allIncidents.some(i => i.ongoing) ? "var(--fail)" : "var(--text)";
 
-  // Renderowanie grup i kart usług
   dom.app.innerHTML = "";
   for (const [groupName, items] of Object.entries(groups)) {
     const groupEl = document.createElement("section");
@@ -136,32 +160,33 @@ function renderDashboard(endpoints) {
 
   renderIncidents(allIncidents);
 
-  const nowStr = new Date().toLocaleTimeString("pl-PL");
-  dom.lastUpdate.textContent = `LAST_SYNC: ${nowStr}`;
+  const syncTime = lastVpsTs
+    ? new Date(lastVpsTs * 1000).toLocaleTimeString("pl-PL")
+    : new Date().toLocaleTimeString("pl-PL");
+  dom.lastUpdate.textContent = `VPS_HEARTBEAT: ${syncTime}`;
 }
 
 function createServiceCard(ep) {
   const results = ep.results || [];
   const last = results[results.length - 1];
   const isUp = Boolean(last && last.success);
+  const isWgHs = ep.key === "wg-hs";
+  const unit = isWgHs ? "s" : "ms";
 
-  // Obliczenia dla pojedynczej usługi
   const okResults = results.filter(r => r.success);
   const uptimePct = results.length > 0 ? ((okResults.length / results.length) * 100).toFixed(1) : "0.0";
   const durations = okResults.map(r => r.duration).filter(d => typeof d === "number");
-  const avgMs = durations.length > 0 ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0;
-  const maxMs = durations.length > 0 ? Math.max(...durations) : 0;
+  const avgVal = durations.length > 0 ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0;
+  const maxVal = durations.length > 0 ? Math.max(...durations) : 0;
 
-  // Kod odpowiedzi z Gatusa (HTTP status lub TCP)
-  let codeText = "TCP/ICMP";
+  let codeText = isWgHs ? "WG_L3" : "TCP/ICMP";
   let codeClass = isUp ? "code-ok" : "code-err";
-  if (last && typeof last.status === "number" && last.status > 0) {
+  if (!isWgHs && last && typeof last.status === "number" && last.status > 0) {
     codeText = `HTTP ${last.status}`;
-  } else if (last && !last.success) {
+  } else if (!isWgHs && last && !last.success) {
     codeText = "NO_RESP";
   }
 
-  // Ostatnie MAX_BARS pomiarów
   const slice = results.slice(-MAX_BARS);
   const padded = Array(Math.max(0, MAX_BARS - slice.length)).fill(null).concat(slice);
 
@@ -179,14 +204,15 @@ function createServiceCard(ep) {
     } else {
       bar.className = `bar ${r.success ? "up" : "down"}`;
       const time = new Date(r.timestamp).toLocaleTimeString("pl-PL");
-      const statusPart = r.status > 0 ? `HTTP ${r.status}` : (r.success ? "CONNECTED" : "TIMEOUT/ERR");
+      const statusPart = isWgHs
+        ? `Handshake age: ${r.duration}s`
+        : (r.status > 0 ? `HTTP ${r.status}` : (r.success ? "CONNECTED" : "TIMEOUT/ERR"));
       const errPart = getFailureReason(r);
-      bar.dataset.tip = `[${time}] ${r.success ? "OK" : "FAIL"} | ${statusPart} | ${r.duration} ms${errPart ? " | " + errPart : ""}`;
+      bar.dataset.tip = `[${time}] ${r.success ? "OK" : "FAIL"} | ${statusPart}${isWgHs ? "" : " | " + r.duration + " ms"}${errPart ? " | " + errPart : ""}`;
     }
     barsContainer.appendChild(bar);
   });
 
-  // Opis bieżącego błędu, jeśli usługa leży
   let errorBannerHtml = "";
   if (!isUp && last) {
     const reason = getFailureReason(last) || (last.status > 0 ? `Otrzymano nieoczekiwany kod HTTP ${last.status}` : "Brak odpowiedzi z hosta docelowego");
@@ -204,8 +230,8 @@ function createServiceCard(ep) {
       </div>
       <div class="meta">
         <span class="meta-item">UP: <strong>${uptimePct}%</strong></span>
-        <span class="meta-item">NOW: <strong>${last ? last.duration : 0}ms</strong></span>
-        <span class="meta-item">AVG/MAX: <strong>${avgMs}/${maxMs}ms</strong></span>
+        <span class="meta-item">NOW: <strong>${last ? last.duration : 0}${unit}</strong></span>
+        <span class="meta-item">AVG/MAX: <strong>${avgVal}/${maxVal}${unit}</strong></span>
         <span class="status-tag ${isUp ? "up" : "down"}">${isUp ? "ONLINE" : "OFFLINE"}</span>
       </div>
     </div>
@@ -337,7 +363,6 @@ function escapeHtml(str) {
   }[m]));
 }
 
-// Obsługa własnego retro-tooltipa na paskach historii
 document.addEventListener("mouseover", e => {
   const bar = e.target.closest(".bar");
   if (!bar || !bar.dataset.tip) return;
